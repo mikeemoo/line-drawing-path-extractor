@@ -1,38 +1,29 @@
 # Line Drawing Path Extractor
 
-A deep learning technique for extracting clean paths from line drawings, featuring two complementary models:
+A deep learning model for extracting skeleton lines from images using query points.
 
-1. Skeletonization Model: Extracts clean, single-pixel-wide skeleton lines from input drawings
-2. Repair Model: Fixes damaged or incomplete skeleton lines
+## Model Architecture
 
-## Models
+The PathExtractionNet is designed to extract a single skeleton line given an input image and a query point. It uses a combination of:
 
-### Skeletonization Model
-- **Input**: Grayscale line drawings with varying line thickness
-- **Output**: Single-pixel-wide skeleton lines
-- **Architecture**: Enhanced deep neural network with:
-  - Encoder path with dilated convolutions for larger receptive field
-  - Decoder path with skip connections for precise localization
-  - Residual blocks for better gradient flow
-  - Final sigmoid activation for binary output
+- Dilated residual blocks for multi-scale feature extraction
+- Self-attention mechanism for global context
+- Skip connections for preserving spatial information
+- Gradual channel reduction for final prediction
 
-### Repair Model
-- **Input**: Damaged skeleton lines (with gaps, overdraw, or missing segments)
-- **Output**: Clean, continuous skeleton lines
-- **Architecture**: Specialized U-Net style network with:
-  - Dilated convolutions in middle layers for context awareness
-  - Skip connections to preserve fine details
-  - Focus on local and global line connectivity
+### Input
+- Grayscale image: [B, 1, H, W]
+- Query point: [B, 2] containing (y,x) coordinates
+
+### Output
+- Probability map: [B, 1, H, W] indicating the likelihood of each pixel being part of the skeleton line
 
 ## Training Data
 
 The models are trained on procedurally generated data with the following characteristics:
 - Random line drawings with varying thickness
 - Controlled line complexity (number of points, curves)
-- Simulated damage for repair model training:
-  - Random pixel removal
-  - Line thickness variations
-  - Overdraw effects
+- Generated using line_drawing_dataset.py with customizable parameters
 
 ## Installation
 `pip install -r requirements.txt`
@@ -41,6 +32,13 @@ The models are trained on procedurally generated data with the following charact
 
 ### Basic Training
 `python -m src.main --wandb_mode disabled`
+
+### Custom Training
+The training process can be customized with various command line arguments:
+- --batch_size: Number of samples per batch
+- --epochs: Number of training epochs
+- --learning_rate: Initial learning rate
+- --wandb_mode: Enable/disable Weights & Biases logging
 
 ## Requirements
 - PyTorch (with CUDA support recommended)
@@ -51,29 +49,22 @@ The models are trained on procedurally generated data with the following charact
 - Weights & Biases (optional, for experiment tracking)
 
 ## Project Structure
-
-```
-src/
-├── data/
-│ └── line_drawing_dataset.py # Dataset and data loading
-├── models/
-│ ├── skeletonization.py # Main skeletonization model
-│ └── skeleton_repair_net.py # Repair model for fixing damaged lines
-├── losses/
-│ ├── f1_loss.py # F1 score based loss function
-│ └── repair_loss.py # Specialized loss for repair model
-└── utils/
-├── data_generation.py # Procedural training data generation
-├── training.py # Training loop and utilities
-└── visualization.py # Visualization tools
-```
+- src/
+  - data/: Dataset generation and loading
+  - losses/: Custom loss functions (F1 and repair losses)
+  - models/: Neural network architecture
+  - main.py: Training and evaluation scripts
+- models/: Pretrained model weights
+- requirements.txt: Project dependencies
+- setup.py: Package installation configuration
 
 ## Model Performance
-- Skeletonization model achieves clean path extraction with:
-  - High precision in line placement
-  - Consistent single-pixel width
-  - Preservation of line connectivity
-- Repair model successfully handles:
-  - Gap filling in broken lines
-  - Removal of overdraw artifacts
-  - Recovery of missing line segments
+The PathExtractionNet achieves:
+- High accuracy in skeleton line extraction
+- Robust performance with varying line thicknesses
+- Real-time inference capability
+- Effective handling of complex line intersections and curves
+
+## License
+This project is licensed under the included LICENSE file.
+

@@ -3,37 +3,56 @@ import matplotlib
 import numpy as np
 matplotlib.use('Agg')  # Set the backend before importing pyplot
 
-def visualize_all_predictions(input_image, ground_truth, raw_pred):
-    """Visualize all prediction methods side by side."""
-    # Create a figure with 4 subplots in a single row
-    fig, axes = plt.subplots(1, 4, figsize=(20, 10))
+def visualize_all_predictions(input_image, pixel_mask, predicted_path, ground_truth_path, save_path=None):
+    """Visualize model predictions for path extraction.
     
-    # Threshold predictions for visualization
-    threshold = 0.5
-    raw_pred_binary = (raw_pred > threshold).astype(float)
+    Args:
+        input_image (torch.Tensor): Input image [1, H, W]
+        pixel_mask (torch.Tensor): Single pixel mask [1, H, W]
+        predicted_path (torch.Tensor): Predicted skeleton path [1, H, W]
+        ground_truth_path (torch.Tensor): Ground truth skeleton path [1, H, W]
+        save_path (str, optional): Path to save the visualization
+        
+    Returns:
+        matplotlib.figure.Figure: Figure containing the visualization
+    """
+    # Convert tensors to numpy arrays and remove channel dimension
+    input_image = input_image.squeeze().numpy()
+    pixel_mask = pixel_mask.squeeze().numpy()
+    predicted_path = predicted_path.squeeze().numpy()
+    ground_truth_path = ground_truth_path.squeeze().numpy()
     
-    # Plot each image
-    axes[0].imshow(input_image, cmap='gray')
-    axes[0].set_title('Input Image')
+    # Create figure with subplots
+    fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+    fig.suptitle('Path Extraction Results', fontsize=16)
     
-    axes[1].imshow(ground_truth, cmap='gray')
-    axes[1].set_title('Ground Truth')
+    # Plot input image
+    axes[0, 0].imshow(input_image, cmap='gray')
+    axes[0, 0].set_title('Input Image')
+    axes[0, 0].axis('off')
     
-    axes[2].imshow(raw_pred_binary, cmap='gray')
-    axes[2].set_title('Model Prediction')
+    # Plot pixel mask
+    axes[0, 1].imshow(input_image, cmap='gray')
+    mask_y, mask_x = np.where(pixel_mask > 0.5)
+    if len(mask_y) > 0:  # If there are points to plot
+        axes[0, 1].scatter(mask_x, mask_y, c='red', s=50)
+    axes[0, 1].set_title('Selected Pixel')
+    axes[0, 1].axis('off')
     
-    # Create comparison visualization
-    axes[3].imshow(ground_truth, cmap='gray')  # Show ground truth in grayscale
-    # Add prediction overlay in red
-    overlay = np.zeros((*ground_truth.shape, 4))  # RGBA
-    overlay[..., 0] = raw_pred_binary  # Red channel for predictions
-    overlay[..., 3] = raw_pred_binary * 0.7  # Alpha channel
-    axes[3].imshow(overlay, cmap='Reds', alpha=0.5)
-    axes[3].set_title('Prediction vs Ground Truth')
+    # Plot predicted path
+    axes[1, 0].imshow(predicted_path, cmap='gray')
+    axes[1, 0].set_title('Predicted Path')
+    axes[1, 0].axis('off')
     
-    # Turn off axes for all subplots
-    for ax in axes.flat:
-        ax.axis('off')
+    # Plot ground truth path
+    axes[1, 1].imshow(ground_truth_path, cmap='gray')
+    axes[1, 1].set_title('Ground Truth Path')
+    axes[1, 1].axis('off')
     
     plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
+        plt.close()
+    
     return fig 

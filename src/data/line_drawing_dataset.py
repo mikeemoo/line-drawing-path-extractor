@@ -20,10 +20,9 @@ class LineDrawingDataset(Dataset):
                  min_lines=1,
                  max_lines=3,
                  min_points=3,
-                 max_points=5,
+                 max_points=3,
                  start_edge_prob=0.5,
-                 overdraw_prob=0.05,  # Probability of a pixel being considered for overdraw
-                 pixel_remove_prob=0.1):  # Probability of removing a pixel from the skeleton
+                 fixed_seed=None):
         """
         Args:
             size: Number of samples in dataset
@@ -34,8 +33,7 @@ class LineDrawingDataset(Dataset):
             min_points: Minimum number of points per line
             max_points: Maximum number of points per line
             start_edge_prob: Probability of starting a line from an edge
-            overdraw_prob: Probability of a pixel being considered for overdraw
-            pixel_remove_prob: Probability of removing a pixel from the skeleton
+            fixed_seed: Seed for fixed data generation
         """
         self.size = size
         self.image_size = image_size
@@ -45,35 +43,31 @@ class LineDrawingDataset(Dataset):
         self.min_points = min_points
         self.max_points = max_points
         self.start_edge_prob = start_edge_prob
-        self.overdraw_prob = overdraw_prob
-        self.pixel_remove_prob = pixel_remove_prob
+        if fixed_seed is not None:
+            random.seed(fixed_seed)
+            np.random.seed(fixed_seed)
 
     def __len__(self):
         return self.size
 
     def __getitem__(self, idx):
-        """Generate a single training sample.
-        
-        Returns:
-            tuple: Contains:
-                - input_tensor (torch.Tensor): Input image [1, H, W]
-                - skeleton_tensor (torch.Tensor): Ground truth skeleton [1, H, W]
-                - damaged_tensor (torch.Tensor): Damaged skeleton for repair [1, H, W]
-            where H, W = self.image_size (default: 64, 64)
-        """
+        """Generate a single training sample."""
         # Create blank images
         input_img = np.zeros(self.image_size, dtype=np.float32)
-        skeleton_img = np.zeros(self.image_size, dtype=np.float32)
-        damaged_img = np.zeros(self.image_size, dtype=np.float32)
+        full_skeleton_img = np.zeros(self.image_size, dtype=np.float32)
         
         # Create PIL images for drawing
         pil_input = Image.new('L', self.image_size, 0)
         draw_input = ImageDraw.Draw(pil_input)
         
+        # Create an array to track how many lines each pixel belongs to
+        pixel_line_count = np.zeros(self.image_size, dtype=np.int32)
+        
         # Generate random number of lines
         num_lines = random.randint(self.min_lines, self.max_lines)
         
-        all_skeleton_points = set()  # Use a set to avoid duplicates
+        # Store thick line pixels for each skeleton line
+        thick_pixels_per_line = []  # List of (thick_pixels, skeleton_points) tuples
         
         for _ in range(num_lines):
             points = random_points(
@@ -85,16 +79,38 @@ class LineDrawingDataset(Dataset):
             )
             spline_points = catmull_rom_spline(points)
             
-            # Draw thick line for input
+            # Create a separate PIL image for this thick line
+            line_img = Image.new('L', self.image_size, 0)
+            line_draw = ImageDraw.Draw(line_img)
+            
+            # Draw thick line
             thickness = random.randint(1, 5)
             draw_thick_line(draw_input, spline_points, thickness)
+            draw_thick_line(line_draw, spline_points, thickness)
             
-            # Generate skeleton points using Bresenham's algorithm
+            # Get thick line pixels
+            line_array = np.array(line_img)
+            y_coords, x_coords = np.where(line_array >= 128)
+            thick_pixels = set(zip(x_coords, y_coords))  # Store as (x,y)
+            
+            # Update pixel line count
+            for x, y in thick_pixels:
+                pixel_line_count[y, x] += 1
+            
+            # Generate skeleton points for this line
+            skeleton_points = set()
             for i in range(len(spline_points) - 1):
                 x1, y1 = map(int, spline_points[i])
                 x2, y2 = map(int, spline_points[i + 1])
                 skeleton_line = bresenham_line(x1, y1, x2, y2)
-                all_skeleton_points.update(skeleton_line)
+                skeleton_points.update(skeleton_line)
+                
+                # Add to full skeleton
+                for x, y in skeleton_line:
+                    if 0 <= x < self.image_size[0] and 0 <= y < self.image_size[1]:
+                        full_skeleton_img[y, x] = 1.0
+            
+            thick_pixels_per_line.append((thick_pixels, skeleton_points))
         
         # Convert input image to numpy array and normalize
         input_img = np.array(pil_input, dtype=np.float32) / 255.0
@@ -103,39 +119,46 @@ class LineDrawingDataset(Dataset):
         noise = np.random.normal(0, self.noise_level, input_img.shape)
         input_img = np.clip(input_img + noise, 0, 1)
         
-        # Create skeleton image and damaged image
-        for x, y in all_skeleton_points:
+        # Find valid pixels (those belonging to only one line)
+        valid_pixels_per_line = []
+        for thick_pixels, skeleton_points in thick_pixels_per_line:
+            # Filter to keep only pixels that belong to one line
+            valid_pixels = {(x, y) for x, y in thick_pixels 
+                          if pixel_line_count[y, x] == 1}
+            if valid_pixels:  # Only add if there are valid pixels
+                valid_pixels_per_line.append((valid_pixels, skeleton_points))
+        
+        # If no valid pixels found, retry generation
+        if not valid_pixels_per_line:
+            return self.__getitem__(idx)
+        
+        # Randomly select one line that has valid pixels
+        selected_line_idx = random.randint(0, len(valid_pixels_per_line) - 1)
+        valid_pixels, skeleton_points = valid_pixels_per_line[selected_line_idx]
+        
+        # Randomly select one pixel from the valid pixels
+        selected_pixel = random.choice(list(valid_pixels))
+        
+        # Create query point tensor (y, x)
+        query_point = torch.tensor([selected_pixel[1], selected_pixel[0]], dtype=torch.long)
+        
+        # Create selected skeleton image
+        selected_skeleton = np.zeros(self.image_size, dtype=np.float32)
+        for x, y in skeleton_points:
             if 0 <= x < self.image_size[0] and 0 <= y < self.image_size[1]:
-                skeleton_img[y, x] = 1.0
-                # Add skeleton points to damaged with random removal
-                if random.random() >= self.pixel_remove_prob:
-                    damaged_img[y, x] = 1.0
-        
-        # Add subtle overdrawing
-        overdrawn_points = set()
-        for x, y in all_skeleton_points:
-            # Only consider this pixel for overdrawing with some probability
-            if random.random() < self.overdraw_prob:
-                # Choose one random adjacent pixel (4-connected neighborhood)
-                dx = random.choice([0, 1, 0, -1])
-                dy = random.choice([1, 0, -1, 0]) if dx == 0 else 0
-                
-                new_x, new_y = x + dx, y + dy
-                if (0 <= new_x < self.image_size[0] and 
-                    0 <= new_y < self.image_size[1] and
-                    (new_x, new_y) not in all_skeleton_points):
-                    overdrawn_points.add((new_x, new_y))
-        
-        # Add overdrawn points to damaged image
-        for x, y in overdrawn_points:
-            damaged_img[y, x] = 1.0
+                selected_skeleton[y, x] = 1.0
         
         # Convert to tensors and add channel dimension
         input_tensor = torch.from_numpy(input_img).float().unsqueeze(0)
-        skeleton_tensor = torch.from_numpy(skeleton_img).float().unsqueeze(0)
-        damaged_tensor = torch.from_numpy(damaged_img).float().unsqueeze(0)
+        selected_skeleton_tensor = torch.from_numpy(selected_skeleton).float().unsqueeze(0)
+        full_skeleton_tensor = torch.from_numpy(full_skeleton_img).float().unsqueeze(0)
         
-        return input_tensor, skeleton_tensor, damaged_tensor
+        # Add validation checks
+        if selected_skeleton.sum() == 0:
+            print(f"Warning: Generated skeleton at idx {idx} has no active pixels")
+            return self.__getitem__(idx)  # Retry generation
+        
+        return input_tensor, query_point, selected_skeleton_tensor, full_skeleton_tensor
 
 def create_dataloaders(batch_size=32, 
                       train_size=1000,
@@ -143,8 +166,17 @@ def create_dataloaders(batch_size=32,
                       num_workers=4,
                       **dataset_kwargs):
     """Create training and validation dataloaders."""
-    train_dataset = LineDrawingDataset(size=train_size, **dataset_kwargs)
-    val_dataset = LineDrawingDataset(size=val_size, **dataset_kwargs)
+    train_dataset = LineDrawingDataset(
+        size=train_size, 
+        fixed_seed=None,  # Random training data
+        **dataset_kwargs
+    )
+    
+    val_dataset = LineDrawingDataset(
+        size=val_size, 
+        fixed_seed=42,  # Fixed seed for validation
+        **dataset_kwargs
+    )
     
     train_loader = DataLoader(
         train_dataset,

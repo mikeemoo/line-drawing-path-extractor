@@ -32,3 +32,4 @@ class F1Loss(nn.Module):
         f1 = 2 * (precision * recall) / (precision + recall + self.epsilon)
         
         return 1 - f1  # Convert to loss 
+

@@ -1,4 +1,3 @@
-from .skeletonization import Skeletonization
-from .skeleton_repair_net import SkeletonRepairNet
+from .path_extraction_net import PathExtractionNet
 
-__all__ = ['Skeletonization', 'SkeletonRepairNet'] 
+__all__ = ['PathExtractionNet'] 
