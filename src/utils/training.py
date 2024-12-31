@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import logging
-import wandb
+from torch.utils.tensorboard import SummaryWriter
 import os
 from time import perf_counter
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import time
 
 from ..data.line_drawing_dataset import create_dataloaders
 from .visualization import visualize_all_predictions
@@ -71,7 +72,7 @@ def calculate_metrics(skeleton_pred, skeleton_target):
     }
 
 def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004, 
-                gradient_clip_value=1.0, criterion=None, hidden_channels=64):
+                gradient_clip_value=1.0, criterion=None, hidden_channels=64, run_name=None):
     """Training loop for path extraction model.
     
     The model takes an input image and a query point to extract the corresponding skeleton path:
@@ -85,11 +86,21 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
         gradient_clip_value: Value to clip gradients at
         criterion: Loss function to use
         hidden_channels: Number of channels in hidden layers (multiple of 8 for efficiency)
-    
-    where B = batch_size (default: 4), H, W = image dimensions (default: 64, 64)
+        run_name: Optional name for this training run (used in TensorBoard)
     """
     os.makedirs('visualizations', exist_ok=True)
     os.makedirs('models', exist_ok=True)
+    os.makedirs('runs', exist_ok=True)
+    
+    # Create unique run name with timestamp
+    timestamp = time.strftime('%Y%m%d-%H%M%S')
+    run_dir = f'runs/path_extraction_{timestamp}'
+    if run_name:
+        run_dir += f'_{run_name}'
+    
+    # Initialize TensorBoard writer with unique run name
+    writer = SummaryWriter(run_dir)
+    logging.info(f"TensorBoard logs will be saved to: {run_dir}")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Training on: {device}")
@@ -100,7 +111,6 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
         for m in model.context.modules():
             if isinstance(m, nn.MultiheadAttention):
                 m.use_checkpoint = True
-                # Reduce number of attention heads if possible
                 if hasattr(m, 'num_heads') and m.num_heads > 2:
                     m.num_heads = 2
                 logging.debug("Enabled gradient checkpointing for attention layers")
@@ -112,9 +122,8 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=learning_rate * 0.005)
     
-    # Comment out early stopping
-    # early_stopping = EarlyStopping(patience=100, min_delta=0.0005)
-    wandb_enabled = wandb.run is not None
+    # Log model parameters
+    writer.add_scalar('Parameters/Total', sum(p.numel() for p in model.parameters()))
     
     # Create dataloaders with smaller batch sizes
     train_loader, val_loader = create_dataloaders(
@@ -124,12 +133,6 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
         num_workers=0  # Disable multiprocessing to save memory
     )
     logging.info(f"Created dataloaders with batch size {batch_size}")
-    
-    # Log model configuration
-    if wandb_enabled:
-        wandb.config.update({
-            "model_params": sum(p.numel() for p in model.parameters())
-        }, allow_val_change=True)
     
     # Enable automatic mixed precision with more aggressive optimization
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -193,16 +196,10 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
         epoch_time = perf_counter() - epoch_start_time
         avg_training_loss = training_loss / len(train_loader)
         
-        # Log metrics
-        log_dict = {
-            "epoch": epoch,
-            "training_loss": avg_training_loss,
-            "epoch_time": epoch_time,
-            "learning_rate": scheduler.get_last_lr()[0]
-        }
-        
-        if wandb_enabled:
-            wandb.log(log_dict)
+        # Log metrics to TensorBoard
+        writer.add_scalar('Loss/Train', avg_training_loss, epoch)
+        writer.add_scalar('Time/Epoch', epoch_time, epoch)
+        writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], epoch)
         
         scheduler.step()
         
@@ -235,16 +232,12 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
                 'f1_score': np.mean([m['f1_score'] for m in val_metrics_list])
             }
             
-            # Log validation metrics
-            if wandb_enabled:
-                wandb.log({
-                    'epoch': epoch,
-                    'val_loss': avg_metrics['loss'],
-                    'val_iou': avg_metrics['iou'],
-                    'val_precision': avg_metrics['precision'],
-                    'val_recall': avg_metrics['recall'],
-                    'val_f1_score': avg_metrics['f1_score']
-                })
+            # Log validation metrics to TensorBoard
+            writer.add_scalar('Loss/Validation', avg_metrics['loss'], epoch)
+            writer.add_scalar('Metrics/IoU', avg_metrics['iou'], epoch)
+            writer.add_scalar('Metrics/Precision', avg_metrics['precision'], epoch)
+            writer.add_scalar('Metrics/Recall', avg_metrics['recall'], epoch)
+            writer.add_scalar('Metrics/F1', avg_metrics['f1_score'], epoch)
             
             # Log epoch summary
             logging.info(
@@ -255,12 +248,7 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
                 f"Validation F1: {avg_metrics['f1_score']:.4f}"
             )
             
-            # Comment out early stopping check
-            # if early_stopping.early_stop:
-            #     logging.info("Early stopping triggered")
-            #     break
-            
-            # More aggressive memory cleanup during validation
+            # Visualization every 20 epochs
             if epoch % 20 == 0:
                 with torch.no_grad():
                     torch.cuda.empty_cache()
@@ -268,9 +256,8 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
                     # Get a fresh batch of validation samples
                     viz_inputs, viz_queries, viz_skeletons, _ = next(iter(val_loader))
                     
-                    # Select 4 samples for visualization
+                    # Select 2 samples for visualization
                     num_viz = min(2, len(viz_inputs))
-                    viz_images = []  # Store images for wandb logging
                     
                     for i in range(num_viz):
                         viz_input = viz_inputs[i:i+1].to(device)
@@ -281,7 +268,7 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
                         viz_mask = torch.zeros_like(viz_input)
                         viz_mask[0, 0, viz_query[0, 0], viz_query[0, 1]] = 1
                         
-                        # Save to disk
+                        # Save visualization
                         fig = visualize_all_predictions(
                             viz_input.cpu(),
                             viz_mask.cpu(),
@@ -290,19 +277,11 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
                             f'visualizations/epoch_{epoch}_sample_{i}.png'
                         )
                         
-                        # Store for wandb
-                        if wandb_enabled:
-                            viz_images.append(wandb.Image(fig))
+                        # Log figure to TensorBoard
+                        writer.add_figure(f'Predictions/Sample_{i}', fig, epoch)
                         plt.close(fig)
                         
                         del viz_output, viz_mask
-                    
-                    # Log to wandb
-                    if wandb_enabled and viz_images:
-                        wandb.log({
-                            "predictions": viz_images,
-                            "epoch": epoch
-                        })
                     
                     torch.cuda.empty_cache()
                     logging.info(f"Saved visualizations for epoch {epoch}")
@@ -331,13 +310,10 @@ def train_model(model, num_epochs=200, batch_size=4, learning_rate=0.004,
                     'loss': avg_metrics['loss'],
                 }, f'models/model_epoch_{epoch}.pt')
         
-        if wandb.run is not None:
-            wandb.log({
-                'avg_gradient_norm': avg_grad_norm,
-                'learning_rate': scheduler.get_last_lr()[0],
-                'epoch': epoch
-            })
+        # Log gradient norm
+        writer.add_scalar('Gradients/Average_Norm', avg_grad_norm, epoch)
     
+    writer.close()
     logging.info(f"Training completed.")
     return {
         'epochs_trained': epoch + 1

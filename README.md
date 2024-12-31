@@ -31,14 +31,13 @@ The models are trained on procedurally generated data with the following charact
 ## Usage
 
 ### Basic Training
-`python -m src.main --wandb_mode disabled`
+`python -m src.main`
 
 ### Custom Training
 The training process can be customized with various command line arguments:
 - --batch_size: Number of samples per batch
 - --epochs: Number of training epochs
 - --learning_rate: Initial learning rate
-- --wandb_mode: Enable/disable Weights & Biases logging
 
 ## Requirements
 - PyTorch (with CUDA support recommended)
@@ -46,7 +45,6 @@ The training process can be customized with various command line arguments:
 - Pillow
 - Matplotlib
 - tqdm
-- Weights & Biases (optional, for experiment tracking)
 
 ## Project Structure
 - src/
