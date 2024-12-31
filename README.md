@@ -63,6 +63,8 @@ The PathExtractionNet achieves:
 - Real-time inference capability
 - Effective handling of complex line intersections and curves
 
+![results after epoch 8000](https://raw.githubusercontent.com/mikeemoo/line-drawing-path-extractor/refs/heads/main/docs/epoch_8000_sample_1.png)
+
 ## License
 This project is licensed under the included LICENSE file.
 
